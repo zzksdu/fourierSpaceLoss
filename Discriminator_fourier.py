@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.fft as fft
 
 class GANLoss(nn.Module):
 
@@ -85,20 +86,55 @@ class Discriminator_fourier(nn.Module):
             x = layer(x)
         return x
 
+class fourier_Dloss(nn.Module):
+    def __init__(self):
+        super(fourier_Dloss, self).__init__()
+        self.net_df = Discriminator_fourier()
+        self.cri_gan = GANLoss()
+
+    def tensor2fft(self, image):
+        frm_list = []
+        fre_quen = []
+        for i in range(3):
+            in_ = image[:, i:i + 1, :, :]
+            fftn = fft.fftn(in_, dim=(2, 3))
+            # add shift
+            fftn_shift = fft.fftshift(fftn) #+ 1e-8
+            #print('fftn:', fftn_shift.size())
+            fre_m = torch.abs(fftn_shift)[:,:, :, :]
+            fre_p = torch.angle(fftn_shift)[:,:, :, :]
+            frm_list.append(fre_m)
+            fre_quen.append(fre_p)
+        fre_mag = torch.cat(frm_list, dim=1)
+        fre_ang = torch.cat(fre_quen, dim=1)
+        return torch.cat([fre_mag, fre_ang], dim=1) # 1 * 256 * 256 * 6
+
+    def comFouier(self, sr, hr):
+        b, c, h, w = sr.size()
+        win1 = torch.hann_window(h).reshape(h, 1).cuda()
+        win2 = torch.hann_window(w).reshape(1, w).cuda()
+        win = torch.mm(win1, win2)
+        sr_w, hr_w = sr * win, hr * win
+        sr_fre = self.tensor2fft(sr_w)
+        hr_fre = self.tensor2fft(hr_w)
+        return sr_fre, hr_fre
+
+    def forward(self, gt, output):
+        gt_fourier = self.comFouier(gt)
+        sr_fourier = self.comFouier(output)
+        real_d_pred = self.net_df(gt_fourier).detach()
+        fake_g_pred = self.net_df(sr_fourier)
+        l_g_real = self.cri_gan(real_d_pred - torch.mean(fake_g_pred), False, is_disc=False)
+        l_g_fake = self.cri_gan(fake_g_pred - torch.mean(real_d_pred), True, is_disc=False)
+        l_g_gan_df = (l_g_real + l_g_fake) / 2
+        return l_g_gan_df
+
 
 
 if __name__ == "__main__":
 
     sr = torch.rand([1, 3, 256, 256])
     hr = torch.rand([1, 3, 256, 256])
-    D = Discriminator_fourier()
-    cri_gan = GANLoss()
-    fake_d_pred = D(sr).detach()
-    real_d_pred = D(hr)
-    l_d_real = cri_gan(real_d_pred - torch.mean(fake_d_pred), True, is_disc=True) * 0.5
-    l_d_real.backward()
 
-    # fake_d_pred = self.net_d(self.output.detach())
-    fake_d_pred = D(sr.detach())
-    l_d_fake = cri_gan(fake_d_pred - torch.mean(real_d_pred.detach()), False, is_disc=True) * 0.5
-    l_d_fake.backward()
+    fourier_Dloss = fourier_Dloss().forward(hr, sr)
+    print(fourier_Dloss)
